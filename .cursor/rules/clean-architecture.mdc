@@ -218,3 +218,24 @@ var usuario = new Usuario
 | `ValidationExceptionHandler` | `Middleware/ValidationExceptionHandler.cs` | Errores FluentValidation → 400. |
 
 **Arranque:** `InitializeDatabaseAsync()` aplica migraciones y ejecuta seed si la tabla está vacía.
+
+### Tests (`Api.Tests`)
+
+```
+Api.Tests/
+├── Infrastructure/     ← host Aspire, WebApplicationFactory, Respawn
+├── Factories/          ← Bogus: datos fake aislados + seed de BD para tests
+└── Features/           ← tests reales (escenarios + Shouldly)
+```
+
+| Recurso | Ubicación | Descripción |
+|---------|-----------|-------------|
+| `Api.Tests.AppHost` | `Api.Tests.AppHost/` | AppHost solo SQL Server efímero. |
+| `TestHost` | `Infrastructure/TestHost.cs` | Ciclo de vida Aspire Testing + Respawn. |
+| `UsuarioFactory` | `Factories/UsuarioFactory.cs` | Entidades fake con Bogus (solo tests). |
+| `UsuarioDbSeeder` | `Factories/UsuarioDbSeeder.cs` | Persiste datos de `UsuarioFactory` en BD. |
+| `GetUsuariosTests` | `Features/Usuarios/` | Escenarios HTTP + MediatR con Shouldly. |
+
+```bash
+dotnet test Api.Tests/Api.Tests.csproj
+```

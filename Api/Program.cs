@@ -18,7 +18,10 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-await app.InitializeDatabaseAsync();
+if (!app.Environment.IsEnvironment("Testing"))
+{
+    await app.InitializeDatabaseAsync();
+}
 
 app.UseExceptionHandler();
 app.UseHttpsRedirection();
@@ -26,3 +29,5 @@ app.UseHttpsRedirection();
 app.MapControllers();
 
 app.Run();
+
+public partial class Program;
