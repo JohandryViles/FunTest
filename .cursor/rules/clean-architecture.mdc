@@ -1,0 +1,191 @@
+---
+description: Clean Architecture — proyecto único API con Dominio, Aplicación (CQRS/vertical slice) e Infraestructura
+globs: Api/**/*
+alwaysApply: true
+---
+
+# Clean Architecture — Proyecto Api
+
+Proyecto único (`Api/`) organizado por capas lógicas mediante carpetas y namespaces. **Nunca** mezclar responsabilidades entre capas.
+
+## Dependencias (regla de oro)
+
+```
+Domain  ←  Application  ←  Infrastructure
+                ↑
+              Api (Presentación)
+```
+
+| Capa | Puede referenciar | Prohibido |
+|------|-------------------|-----------|
+| **Domain** | Nada externo | EF Core, HTTP, MediatR, ASP.NET |
+| **Application** | Domain | EF Core, HttpClient, controllers |
+| **Infrastructure** | Application, Domain | Controllers, endpoints |
+| **Api** | Application | Acceso directo a DbContext o repos concretos |
+
+## Estructura de carpetas
+
+```
+Api/
+├── Domain/
+│   ├── Entities/          # Agregados y entidades
+│   ├── ValueObjects/      # Objetos de valor inmutables
+│   ├── Enums/
+│   └── Exceptions/        # Excepciones de dominio
+├── Application/
+│   ├── Common/            # Behaviors, interfaces compartidas, Result<T>
+│   └── Features/
+│       └── {NombreFeature}/
+│           ├── Commands/
+│           │   └── {Accion}/
+│           │       ├── {Accion}Command.cs
+│           │       ├── {Accion}CommandHandler.cs
+│           │       └── {Accion}CommandValidator.cs
+│           └── Queries/
+│               └── {Accion}/
+│                   ├── {Accion}Query.cs
+│                   └── {Accion}QueryHandler.cs
+├── Infrastructure/
+│   ├── Data/
+│   │   ├── Persistence/   # DbContext, configuraciones EF
+│   │   └── Repositories/  # Implementaciones de interfaces de Application
+│   ├── External/          # Clientes HTTP, APIs de terceros, colas
+│   └── DependencyInjection/
+│       └── InfrastructureServiceCollectionExtensions.cs
+├── Endpoints/             # Minimal APIs o Controllers (capa de presentación)
+└── Program.cs
+```
+
+## Domain
+
+- **Entidades**: declaran **solo campos reutilizables** (`Id`, datos de negocio). Sin implementar value objects a mano ni lógica de validación de primitivos en la entidad.
+- **Value Objects**: usar **[Vogen](https://github.com/SteveDunn/Vogen)** en `Domain/ValueObjects/`. Tipo `partial` con `[ValueObject<T>]`, validación en `Validate`, normalización en `NormalizeInput`.
+- Sin atributos de EF, sin DTOs, sin lógica de infraestructura.
+- Namespace: `Api.Domain.{Subcarpeta}`.
+
+```csharp
+// ✅ Entidad — solo campos
+public sealed class Usuario
+{
+    public required UsuarioId Id { get; init; }
+    public required string Nombre { get; init; }
+    public required string Apellido { get; init; }
+    public required Email Email { get; init; }
+}
+
+// ✅ Value Object con Vogen (Domain/ValueObjects/Email.cs)
+[ValueObject<string>]
+public readonly partial struct Email
+{
+    private static Validation Validate(string value) => /* ... */;
+}
+```
+
+## Application — CQRS + Vertical Slice
+
+- **Un feature = una carpeta** bajo `Application/Features/{Feature}/`.
+- **Command**: muta estado. **Query**: solo lectura. Nunca mezclar en la misma clase.
+- Handlers implementan `IRequestHandler<TRequest, TResponse>` (MediatR).
+- Validación con FluentValidation en el mismo slice del command/query.
+- Interfaces (puertos) viven en Application; implementaciones en Infrastructure.
+
+```csharp
+// Application/Features/Orders/Commands/CreateOrder/CreateOrderCommand.cs
+public sealed record CreateOrderCommand(string CustomerId, decimal Amount)
+    : IRequest<Result<OrderId>>;
+
+// Handler usa IOrderRepository (interface en Application), no DbContext
+```
+
+- DTOs de respuesta específicos del caso de uso van en el slice del query.
+- Namespace: `Api.Application.Features.{Feature}.{Commands|Queries}.{Accion}`.
+
+## Infrastructure
+
+- **Data**: DbContext, migraciones, `IEntityTypeConfiguration<>`, repositorios concretos.
+- **External**: `HttpClient` tipados, adaptadores a servicios externos.
+- Registrar servicios en `InfrastructureServiceCollectionExtensions.AddInfrastructure()`.
+- Namespace: `Api.Infrastructure.{Data|External|DependencyInjection}`.
+
+```csharp
+// ✅ Repositorio implementa interfaz de Application
+internal sealed class OrderRepository(AppDbContext db) : IOrderRepository { }
+```
+
+## Api (Presentación)
+
+- Endpoints/controllers **delgados**: reciben HTTP → envían command/query a MediatR → mapean respuesta.
+- Sin lógica de negocio ni consultas LINQ directas a la base de datos.
+- Namespace: `Api.Endpoints` o `Api.Controllers`.
+
+```csharp
+// ✅ Endpoint delgado
+app.MapPost("/orders", async (CreateOrderCommand cmd, ISender sender) =>
+{
+    var result = await sender.Send(cmd);
+    return result.IsSuccess ? Results.Created(...) : Results.BadRequest(result.Error);
+});
+```
+
+## Convenciones de nombres
+
+| Elemento | Patrón | Ejemplo |
+|----------|--------|---------|
+| Command | `{Verbo}{Entidad}Command` | `CreateOrderCommand` |
+| Query | `Get{Entidad}By{Criteria}Query` | `GetOrderByIdQuery` |
+| Handler | `{Request}Handler` | `CreateOrderCommandHandler` |
+| Validator | `{Request}Validator` | `CreateOrderCommandValidator` |
+| Interface repo | `I{Entidad}Repository` | `IOrderRepository` |
+| Feature folder | PascalCase singular/plural coherente | `Orders`, `Products` |
+
+## Al crear una nueva funcionalidad
+
+1. Modelar entidad/VO en **Domain** si no existe.
+2. Definir interfaz de repositorio o servicio externo en **Application/Common** o en el slice.
+3. Crear carpeta del feature con command o query + handler + validator.
+4. Implementar persistencia o cliente externo en **Infrastructure**.
+5. Exponer endpoint en **Api** que delegue a MediatR.
+6. Registrar dependencias en `Program.cs` → `AddApplication()` + `AddInfrastructure()`.
+
+## Paquetes recomendados
+
+- `Vogen` — value objects tipados con source generator (validación, igualdad, serialización).
+- `MediatR` — CQRS y pipeline behaviors (validación, logging).
+- `FluentValidation` + `FluentValidation.DependencyInjectionExtensions`.
+- `Microsoft.EntityFrameworkCore` — solo referenciado/usado en Infrastructure.
+
+---
+
+## Implementado
+
+Registro vivo de lo construido. Actualizar esta sección con cada entrega.
+
+### Domain
+
+| Recurso | Ubicación | Descripción |
+|---------|-----------|-------------|
+| `Usuario` | `Domain/Entities/Usuario.cs` | Entidad con campos `Id`, `Nombre`, `Apellido`, `Email`. Solo propiedades, sin VOs manuales. |
+| `UsuarioId` | `Domain/ValueObjects/UsuarioId.cs` | VO Vogen sobre `Guid`. `FromNewGuid()` vía `VogenDefaults`. |
+| `Email` | `Domain/ValueObjects/Email.cs` | VO Vogen sobre `string` con `NormalizeInput` y `Validate`. |
+
+```csharp
+var usuario = new Usuario
+{
+    Id = UsuarioId.FromNewGuid(),
+    Nombre = "Juan",
+    Apellido = "Pérez",
+    Email = Email.From("juan@example.com")
+};
+```
+
+### Application
+
+_Pendiente._
+
+### Infrastructure
+
+_Pendiente._
+
+### Api (Presentación)
+
+_Pendiente._
