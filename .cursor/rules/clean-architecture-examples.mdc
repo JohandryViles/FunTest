@@ -9,7 +9,6 @@ alwaysApply: false
 ## Domain implementado: Usuario
 
 ```csharp
-// Entidad — solo campos
 var usuario = new Usuario
 {
     Id = UsuarioId.FromNewGuid(),
@@ -17,95 +16,59 @@ var usuario = new Usuario
     Apellido = "García",
     Email = Email.From("maria@example.com")
 };
-
-// Value objects Vogen (validación en Validate, no en la entidad)
-var email = Email.From("maria@example.com"); // normaliza trim + lowercase
-var id = UsuarioId.FromNewGuid();
 ```
-
-Value objects: `UsuarioId` (`Guid`), `Email` (`string`) — definidos con Vogen en `Domain/ValueObjects/`.
 
 ---
 
-## Feature: Crear Producto
+## Slice único: GetUsuarios
 
 ```
-Application/Features/Products/Commands/CreateProduct/
-├── CreateProductCommand.cs
-├── CreateProductCommandHandler.cs
-└── CreateProductCommandValidator.cs
+Application/Features/Usuarios/Queries/GetUsuarios.cs
+Controllers/UsuariosController.cs
 ```
 
 ```csharp
-// CreateProductCommand.cs
-public sealed record CreateProductCommand(string Name, decimal Price)
-    : IRequest<Result<Guid>>;
+public sealed record GetUsuariosQuery : IRequest<IReadOnlyList<UsuarioDto>>;
+public sealed record UsuarioDto(Guid Id, string Nombre, string Apellido, string Email);
 
-// CreateProductCommandHandler.cs
-internal sealed class CreateProductCommandHandler(IProductRepository repo)
-    : IRequestHandler<CreateProductCommand, Result<Guid>>
+internal sealed class GetUsuariosQueryHandler(AppDbContext db)
+    : IRequestHandler<GetUsuariosQuery, IReadOnlyList<UsuarioDto>> { ... }
+```
+
+## Slice único: CreateUsuario (ejemplo con validación)
+
+```csharp
+public sealed record CreateUsuarioCommand(string Nombre, string Apellido, string Email)
+    : IRequest<UsuarioDto>;
+
+public sealed record UsuarioDto(Guid Id, string Nombre, string Apellido, string Email);
+
+public sealed class CreateUsuarioCommandValidator : AbstractValidator<CreateUsuarioCommand>
 {
-    public async Task<Result<Guid>> Handle(CreateProductCommand request, CancellationToken ct)
+    public CreateUsuarioCommandValidator()
     {
-        var product = Product.Create(request.Name, new Money(request.Price, "USD"));
-        await repo.AddAsync(product, ct);
-        return Result<Guid>.Success(product.Id.Value);
+        RuleFor(x => x.Nombre).NotEmpty();
+        RuleFor(x => x.Apellido).NotEmpty();
+        RuleFor(x => x.Email).NotEmpty().EmailAddress();
     }
 }
-```
 
-## Feature: Consultar Producto
-
-```
-Application/Features/Products/Queries/GetProductById/
-├── GetProductByIdQuery.cs
-├── GetProductByIdQueryHandler.cs
-└── ProductDto.cs
-```
-
-```csharp
-public sealed record GetProductByIdQuery(Guid Id) : IRequest<Result<ProductDto>>;
-
-public sealed record ProductDto(Guid Id, string Name, decimal Price);
+internal sealed class CreateUsuarioCommandHandler(AppDbContext db)
+    : IRequestHandler<CreateUsuarioCommand, UsuarioDto> { ... }
 ```
 
 ## Anti-patrones (evitar)
 
-```csharp
-// ❌ DbContext en Application o Api
-public class CreateProductHandler(AppDbContext db) { }
-
-// ❌ Entidad de dominio expuesta en endpoint
-app.MapGet("/products/{id}", async (AppDbContext db, Guid id) =>
-    await db.Products.FindAsync(id));
-
-// ❌ Lógica de negocio en controller/endpoint
-if (order.Total > 1000) order.ApplyDiscount(0.1m); // va en Domain o Handler
-
-// ❌ Command que también consulta (mezclar CQRS)
-public record SaveAndListOrdersCommand(...) : IRequest<List<OrderDto>>;
-```
-
-## Result pattern (Application/Common)
-
-Usar `Result<T>` para errores de negocio previsibles sin excepciones de control de flujo:
-
-```csharp
-public sealed class Result<T>
-{
-    public bool IsSuccess { get; }
-    public T Value { get; }
-    public string Error { get; }
-    public static Result<T> Success(T value) => new(true, value, null!);
-    public static Result<T> Failure(string error) => new(false, default!, error);
-}
-```
+- Separar handler, validator y dto en archivos distintos del mismo slice
+- Repositorios intermedios cuando el handler puede usar `AppDbContext` directamente
+- DbContext en Controllers
+- Minimal APIs cuando el proyecto usa Controllers
+- Comentarios en código C#
 
 ## Registro DI (Program.cs)
 
 ```csharp
-builder.Services.AddMediatR(cfg =>
-    cfg.RegisterServicesFromAssembly(typeof(CreateProductCommand).Assembly));
-builder.Services.AddValidatorsFromAssembly(typeof(CreateProductCommand).Assembly);
-builder.Services.AddInfrastructure(builder.Configuration);
+builder.Services.AddApplication();
+builder.Services.AddControllers();
+builder.AddInfrastructure();
 ```

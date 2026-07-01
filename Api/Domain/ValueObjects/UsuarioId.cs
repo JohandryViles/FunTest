@@ -2,7 +2,7 @@ using Vogen;
 
 namespace Api.Domain.ValueObjects;
 
-[ValueObject<Guid>]
+[ValueObject<Guid>(conversions: Conversions.EfCoreValueConverter)]
 public readonly partial struct UsuarioId
 {
     private static Validation Validate(Guid value) =>

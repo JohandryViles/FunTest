@@ -8,4 +8,6 @@ public sealed class Usuario
     public required string Nombre { get; init; }
     public required string Apellido { get; init; }
     public required Email Email { get; init; }
+
+    internal Usuario() { }
 }

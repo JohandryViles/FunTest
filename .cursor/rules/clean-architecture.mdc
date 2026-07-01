@@ -8,6 +8,11 @@ alwaysApply: true
 
 Proyecto único (`Api/`) organizado por capas lógicas mediante carpetas y namespaces. **Nunca** mezclar responsabilidades entre capas.
 
+## Código
+
+- **Sin comentarios** en código C# (`//`, `///`, `/* */`). El código debe ser autoexplicativo.
+- No añadir comentarios al generar o modificar archivos. Aplicar `dotnet csharpier format .` al finalizar cambios.
+
 ## Dependencias (regla de oro)
 
 ```
@@ -19,9 +24,9 @@ Domain  ←  Application  ←  Infrastructure
 | Capa | Puede referenciar | Prohibido |
 |------|-------------------|-----------|
 | **Domain** | Nada externo | EF Core, HTTP, MediatR, ASP.NET |
-| **Application** | Domain | EF Core, HttpClient, controllers |
-| **Infrastructure** | Application, Domain | Controllers, endpoints |
-| **Api** | Application | Acceso directo a DbContext o repos concretos |
+| **Application** | Domain, `AppDbContext` | HttpClient, controllers |
+| **Infrastructure** | Application, Domain | Controllers |
+| **Api** | Application | Acceso directo a `DbContext` |
 
 ## Estructura de carpetas
 
@@ -33,26 +38,21 @@ Api/
 │   ├── Enums/
 │   └── Exceptions/        # Excepciones de dominio
 ├── Application/
-│   ├── Common/            # Behaviors, interfaces compartidas, Result<T>
+│   ├── Common/            # Behaviors, Result<T>
 │   └── Features/
 │       └── {NombreFeature}/
 │           ├── Commands/
-│           │   └── {Accion}/
-│           │       ├── {Accion}Command.cs
-│           │       ├── {Accion}CommandHandler.cs
-│           │       └── {Accion}CommandValidator.cs
+│           │   └── {Accion}.cs    # Command + Handler + Validator + DTOs (un archivo)
 │           └── Queries/
-│               └── {Accion}/
-│                   ├── {Accion}Query.cs
-│                   └── {Accion}QueryHandler.cs
+│               └── {Accion}.cs    # Query + Handler + Validator + DTOs (un archivo)
 ├── Infrastructure/
 │   ├── Data/
-│   │   ├── Persistence/   # DbContext, configuraciones EF
-│   │   └── Repositories/  # Implementaciones de interfaces de Application
+│   │   ├── Persistence/   # DbContext, migraciones, configuraciones EF
+│   │   └── Seeding/       # Datos iniciales
 │   ├── External/          # Clientes HTTP, APIs de terceros, colas
 │   └── DependencyInjection/
 │       └── InfrastructureServiceCollectionExtensions.cs
-├── Endpoints/             # Minimal APIs o Controllers (capa de presentación)
+├── Controllers/           # Controladores ASP.NET Core (capa de presentación)
 └── Program.cs
 ```
 
@@ -64,7 +64,6 @@ Api/
 - Namespace: `Api.Domain.{Subcarpeta}`.
 
 ```csharp
-// ✅ Entidad — solo campos
 public sealed class Usuario
 {
     public required UsuarioId Id { get; init; }
@@ -73,7 +72,6 @@ public sealed class Usuario
     public required Email Email { get; init; }
 }
 
-// ✅ Value Object con Vogen (Domain/ValueObjects/Email.cs)
 [ValueObject<string>]
 public readonly partial struct Email
 {
@@ -83,48 +81,66 @@ public readonly partial struct Email
 
 ## Application — CQRS + Vertical Slice
 
-- **Un feature = una carpeta** bajo `Application/Features/{Feature}/`.
+- **Un slice = un archivo** bajo `Application/Features/{Feature}/Commands|Queries/{Accion}.cs`.
+- Cada archivo contiene: **Query/Command**, **Handler**, **Validator** (FluentValidation) y **DTOs/mapeos**.
 - **Command**: muta estado. **Query**: solo lectura. Nunca mezclar en la misma clase.
-- Handlers implementan `IRequestHandler<TRequest, TResponse>` (MediatR).
-- Validación con FluentValidation en el mismo slice del command/query.
-- Interfaces (puertos) viven en Application; implementaciones en Infrastructure.
+- Handlers implementan `IRequestHandler<TRequest, TResponse>` (MediatR) e inyectan **`AppDbContext`** directamente.
+- Validación ejecutada vía `ValidationBehavior` en pipeline MediatR.
+- Queries: `AsNoTracking()`. Commands: `SaveChangesAsync()` en el handler.
+- Servicios externos (HTTP, colas): interfaces en Application, implementación en Infrastructure.
 
 ```csharp
-// Application/Features/Orders/Commands/CreateOrder/CreateOrderCommand.cs
-public sealed record CreateOrderCommand(string CustomerId, decimal Amount)
-    : IRequest<Result<OrderId>>;
+internal sealed class GetUsuariosQueryHandler(AppDbContext db)
+    : IRequestHandler<GetUsuariosQuery, IReadOnlyList<UsuarioDto>>
+{
+    public async Task<IReadOnlyList<UsuarioDto>> Handle(
+        GetUsuariosQuery request,
+        CancellationToken cancellationToken) =>
+        await db.Usuarios
+            .AsNoTracking()
+            .Select(u => new UsuarioDto(u.Id.Value, u.Nombre, u.Apellido, u.Email.Value))
+            .ToListAsync(cancellationToken);
+}
 
-// Handler usa IOrderRepository (interface en Application), no DbContext
+internal sealed class CreateUsuarioCommandHandler(AppDbContext db)
+    : IRequestHandler<CreateUsuarioCommand, UsuarioDto>
+{
+    public async Task<UsuarioDto> Handle(
+        CreateUsuarioCommand request,
+        CancellationToken cancellationToken)
+    {
+        var usuario = new Usuario { /* ... */ };
+        db.Usuarios.Add(usuario);
+        await db.SaveChangesAsync(cancellationToken);
+        return new UsuarioDto(/* ... */);
+    }
+}
 ```
 
-- DTOs de respuesta específicos del caso de uso van en el slice del query.
-- Namespace: `Api.Application.Features.{Feature}.{Commands|Queries}.{Accion}`.
+- Namespace: `Api.Application.Features.{Feature}.{Commands|Queries}`.
 
 ## Infrastructure
 
-- **Data**: DbContext, migraciones, `IEntityTypeConfiguration<>`, repositorios concretos.
+- **Data**: `AppDbContext`, migraciones, `IEntityTypeConfiguration<>`, seeding.
 - **External**: `HttpClient` tipados, adaptadores a servicios externos.
 - Registrar servicios en `InfrastructureServiceCollectionExtensions.AddInfrastructure()`.
 - Namespace: `Api.Infrastructure.{Data|External|DependencyInjection}`.
 
-```csharp
-// ✅ Repositorio implementa interfaz de Application
-internal sealed class OrderRepository(AppDbContext db) : IOrderRepository { }
-```
-
 ## Api (Presentación)
 
-- Endpoints/controllers **delgados**: reciben HTTP → envían command/query a MediatR → mapean respuesta.
+- **Controladores** delgados en `Controllers/`: reciben HTTP → envían command/query a MediatR → devuelven respuesta.
 - Sin lógica de negocio ni consultas LINQ directas a la base de datos.
-- Namespace: `Api.Endpoints` o `Api.Controllers`.
+- Namespace: `Api.Controllers`.
 
 ```csharp
-// ✅ Endpoint delgado
-app.MapPost("/orders", async (CreateOrderCommand cmd, ISender sender) =>
+[ApiController]
+[Route("api/[controller]")]
+public class UsuariosController(ISender sender) : ControllerBase
 {
-    var result = await sender.Send(cmd);
-    return result.IsSuccess ? Results.Created(...) : Results.BadRequest(result.Error);
-});
+    [HttpGet]
+    public async Task<ActionResult<IReadOnlyList<UsuarioDto>>> Get(CancellationToken ct) =>
+        Ok(await sender.Send(new GetUsuariosQuery(), ct));
+}
 ```
 
 ## Convenciones de nombres
@@ -135,24 +151,22 @@ app.MapPost("/orders", async (CreateOrderCommand cmd, ISender sender) =>
 | Query | `Get{Entidad}By{Criteria}Query` | `GetOrderByIdQuery` |
 | Handler | `{Request}Handler` | `CreateOrderCommandHandler` |
 | Validator | `{Request}Validator` | `CreateOrderCommandValidator` |
-| Interface repo | `I{Entidad}Repository` | `IOrderRepository` |
 | Feature folder | PascalCase singular/plural coherente | `Orders`, `Products` |
 
 ## Al crear una nueva funcionalidad
 
 1. Modelar entidad/VO en **Domain** si no existe.
-2. Definir interfaz de repositorio o servicio externo en **Application/Common** o en el slice.
-3. Crear carpeta del feature con command o query + handler + validator.
-4. Implementar persistencia o cliente externo en **Infrastructure**.
-5. Exponer endpoint en **Api** que delegue a MediatR.
-6. Registrar dependencias en `Program.cs` → `AddApplication()` + `AddInfrastructure()`.
+2. Crear **un archivo** del slice con command/query + handler + validator + DTOs. Handler usa `AppDbContext`.
+3. Agregar configuración EF en **Infrastructure** si la entidad es nueva.
+4. Exponer **controller** en `Controllers/` que delegue a MediatR.
+5. Registrar dependencias en `Program.cs` → `AddApplication()` + `AddInfrastructure()`.
 
 ## Paquetes recomendados
 
 - `Vogen` — value objects tipados con source generator (validación, igualdad, serialización).
 - `MediatR` — CQRS y pipeline behaviors (validación, logging).
 - `FluentValidation` + `FluentValidation.DependencyInjectionExtensions`.
-- `Microsoft.EntityFrameworkCore` — solo referenciado/usado en Infrastructure.
+- `Microsoft.EntityFrameworkCore` — `AppDbContext` en Infrastructure; handlers lo consumen desde Application.
 
 ---
 
@@ -180,12 +194,27 @@ var usuario = new Usuario
 
 ### Application
 
-_Pendiente._
+| Recurso | Ubicación | Descripción |
+|---------|-----------|-------------|
+| `GetUsuariosQuery` | `Application/Features/Usuarios/Queries/GetUsuarios.cs` | Slice paginado: query + validator + handler + DTOs. Params: `page` (≥1), `pageSize` (1-100). |
+| `ValidationBehavior` | `Application/Common/Behaviors/` | Pipeline MediatR para FluentValidation. |
 
 ### Infrastructure
 
-_Pendiente._
+| Recurso | Ubicación | Descripción |
+|---------|-----------|-------------|
+| `AppDbContext` | `Infrastructure/Data/Persistence/` | DbContext EF Core. |
+| `UsuarioConfiguration` | `Infrastructure/Data/Configurations/` | Mapeo EF de `Usuario` (Vogen → primitivos). |
+| `UsuarioSeeder` | `Infrastructure/Data/Seeding/` | Seed con **Bogus** (25 usuarios, locale `es`). |
+| `AddInfrastructure` | `Infrastructure/DependencyInjection/` | `AddSqlServerDbContext<AppDbContext>("bd")` (Aspire 13+). |
+
+**Aspire AppHost:** SQL Server `bdserver` → base de datos `bd`, referenciada por `api` con `WaitFor`.
 
 ### Api (Presentación)
 
-_Pendiente._
+| Recurso | Ubicación | Descripción |
+|---------|-----------|-------------|
+| `GET /api/usuarios?page=1&pageSize=10` | `Controllers/UsuariosController.cs` | Lista paginada vía MediatR. |
+| `ValidationExceptionHandler` | `Middleware/ValidationExceptionHandler.cs` | Errores FluentValidation → 400. |
+
+**Arranque:** `InitializeDatabaseAsync()` aplica migraciones y ejecuta seed si la tabla está vacía.
