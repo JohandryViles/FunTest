@@ -27,5 +27,9 @@ internal sealed class UsuarioConfiguration : IEntityTypeConfiguration<Usuario>
             .HasConversion(email => email.Value, value => Email.From(value))
             .HasMaxLength(256)
             .IsRequired();
+
+        builder.Property(u => u.DeletedAt);
+
+        builder.HasQueryFilter(u => u.DeletedAt == null);
     }
 }
